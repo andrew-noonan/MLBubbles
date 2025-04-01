@@ -1,87 +1,84 @@
-# Entry point of the application
-import os
 import numpy as np
-import scipy.io
 import matplotlib.pyplot as plt
-from sklearn.model_selection import train_test_split
+from matplotlib.patches import Circle
+import scipy.io as sio
+import os
+import multiprocessing
+from functools import partial
+from skimage import exposure
+from tqdm import tqdm
 
-def load_mat_dataset(directory_path):
-    """
-    Load .mat files containing grayscale images and circle annotations.
+def process_single_image(data_item, return_visualization=False):
+    """Process a single image with normalization and auto-contrast"""
+    # Extract image
+    img = np.array(data_item.image, dtype=np.float32)
     
-    Args:
-        directory_path: Path to directory containing .mat files
-        
-    Returns:
-        images: List of grayscale images
-        annotations: List of dictionaries with bubble annotations
-    """
-    images = []
-    annotations = []
+    # Apply CLAHE for auto-contrast
+    img_uint8 = np.uint8(img)
+    clahe = exposure.equalize_adapthist(img_uint8, clip_limit=0.04)
     
-    # List all .mat files in the directory
-    mat_files = [f for f in os.listdir(directory_path) if f.endswith('.mat')]
+    # Normalize to 0-1 range
+    normalized_img = clahe / np.max(clahe)
     
-    for mat_file in mat_files:
-        # Load .mat file
-        mat_path = os.path.join(directory_path, mat_file)
-        mat_data = scipy.io.loadmat(mat_path)
-        
-        # Extract image
-        img = mat_data['img']
-        
-        # Extract circle annotations
-        img_circles = mat_data['imgCircles']
-        centroids = img_circles['centroid'][0, 0]
-        diameters = img_circles['diameterPixels'][0, 0]
-        
-        # Create annotation list for this image
-        img_annotations = []
-        for i in range(len(centroids)):
-            annotation = {
-                'centroidX': float(centroids[i, 0]),
-                'centroidY': float(centroids[i, 1]),
-                'diameter': float(diameters[i])
-            }
-            img_annotations.append(annotation)
-        
-        images.append(img)
-        annotations.append(img_annotations)
+    # Extract bubble annotations
+    x_coords = np.array(data_item.X).flatten()
+    y_coords = np.array(data_item.Y).flatten()
+    diameters = np.array(data_item.dia).flatten()
     
-    return images, annotations
+    # Create annotation list
+    annotations = [
+        {'centroidX': float(x), 'centroidY': float(y), 'diameter': float(d)}
+        for x, y, d in zip(x_coords, y_coords, diameters)
+    ]
+    
+    return normalized_img, annotations
 
-# Visualize an image with its annotations to verify
-def visualize_sample(images, annotations, index=0):
+def parallel_process_data(training_data, num_processes=None):
+    """Process all images in parallel"""
+    if num_processes is None:
+        num_processes = max(1, multiprocessing.cpu_count() - 1)
+    
+    print(f"Processing {len(training_data)} images using {num_processes} processes...")
+    
+    # Create a pool of worker processes
+    with multiprocessing.Pool(processes=num_processes) as pool:
+        # Process images in parallel
+        results = list(tqdm(
+            pool.imap(process_single_image, training_data),
+            total=len(training_data)
+        ))
+    
+    # Separate results into images and annotations
+    processed_images, annotations = zip(*results)
+    
+    return list(processed_images), list(annotations)
+
+def main():
+    mat_file_path = r"C:\Users\anoon\OneDrive - Vanderbilt\Masters Research\MATLAB\MachineLearning Bubbles\trainingDataCompiled.mat"
+    
+    # Load data
+    print("Loading data...")
+    mat_data = sio.loadmat(mat_file_path, squeeze_me=True, struct_as_record=False)
+    training_data = mat_data['trainingData']
+    
+    # Process all images in parallel
+    processed_images, annotations = parallel_process_data(training_data)
+    print(f"Processed {len(processed_images)} images")
+    
+    # Optional: visualize a sample
+    idx = 2  # Change to view different images
     plt.figure(figsize=(10, 8))
-    plt.imshow(images[index], cmap='gray')
+    plt.imshow(processed_images[idx], cmap='gray')
     
-    for bubble in annotations[index]:
-        x, y, d = bubble['centroidX'], bubble['centroidY'], bubble['diameter']
-        circle = plt.Circle((x, y), d/2, fill=False, color='red')
+    # Add circles for bubbles
+    for annot in annotations[idx]:
+        x, y, d = annot['centroidX'], annot['centroidY'], annot['diameter']
+        circle = Circle((x, y), d/2, fill=False, edgecolor='red', linewidth=2)
         plt.gca().add_patch(circle)
     
-    plt.title(f'Sample Image {index}')
+    plt.title(f"Processed Image {idx+1} with {len(annotations[idx])} Bubbles")
     plt.axis('off')
     plt.show()
 
-# Example usage
 if __name__ == "__main__":
-    # Set path to your .mat files directory
-    data_dir = "path/to/mat/files"
-    
-    # Load dataset
-    images, annotations = load_mat_dataset(data_dir)
-    
-    print(f"Loaded {len(images)} images with annotations")
-    
-    # Visualize a sample
-    if len(images) > 0:
-        visualize_sample(images, annotations)
-    
-    # Split into train and validation sets
-    X_train, X_val, y_train, y_val = train_test_split(
-        images, annotations, test_size=0.2, random_state=42
-    )
-    
-    print(f"Training set: {len(X_train)} images")
-    print(f"Validation set: {len(X_val)} images")
+    main()
